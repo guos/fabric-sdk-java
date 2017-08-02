@@ -26,24 +26,26 @@ import java.util.List;
 import javax.json.Json;
 import javax.json.JsonObjectBuilder;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.hyperledger.fabric.shim.ChaincodeBase;
 import org.hyperledger.fabric.shim.ChaincodeStub;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * @author Sergey Pomytkin spomytkin@gmail.com
  */
 public class SimpleChaincode extends ChaincodeBase {
-	private static Log log = LogFactory.getLog(SimpleChaincode.class);
+	private static Logger LOGGER = LoggerFactory.getLogger(SimpleChaincode.class);
 
 	@Override
 	public Response init(ChaincodeStub stub) {
+		LOGGER.info("come to init");
 		try {
 			final List<String> args = stub.getStringArgs();
+			LOGGER.info("the init args is {},args get 0 is {} ",args.toArray(),args.get(0));
 			switch (args.get(0)) {
 			case "init":
-				return init(stub, args.stream().skip(0).toArray(String[]::new));
+				return init(stub, args.stream().skip(1).toArray(String[]::new));
 			default:
 				return newErrorResponse(format("Unknown function: %s", args.get(0)));
 			}
@@ -63,7 +65,7 @@ public class SimpleChaincode extends ChaincodeBase {
 			final List<String> argList = stub.getStringArgs();
 			final String function = argList.get(0);
 			final String[] args = argList.stream().skip(1).toArray(String[]::new);
-
+              LOGGER.info("come to invoke method with call function [{}] and args {}",function,args);
 			switch (function) {
 			case "init":
 				return init(stub, args);
@@ -97,9 +99,11 @@ public class SimpleChaincode extends ChaincodeBase {
 
 	private Response invoke(ChaincodeStub stub, String[] args) {
 		System.out.println("ENTER invoke with args: " + Arrays.toString(args));
+		LOGGER.info("invok args {}",Arrays.toString(args));
 		if (args.length < 2) throw new IllegalArgumentException("Incorrect number of arguments. Expecting at least 2, got " + args.length);
 		final String subFunction = args[0];
 		final String[] subArgs = Arrays.copyOfRange(args, 1, args.length);
+		LOGGER.info("invoke 's sub function is {},with subArgs [{}]",subFunction,Arrays.toString(subArgs));
 		switch (subFunction) {
 		case "move":
 			return transfer(stub, subArgs);
@@ -137,18 +141,19 @@ public class SimpleChaincode extends ChaincodeBase {
 		}
 
 		// perform the transfer
-		log.info(String.format("Tranferring %d holdings from %s to %s", transferAmount, fromKey, toKey));
+		LOGGER.info(String.format("Tranferring %d holdings from %s to %s", transferAmount, fromKey, toKey));
 		int newFromAccountBalance = fromAccountBalance - transferAmount;
 		int newToAccountBalance = toAccountBalance + transferAmount;
-		log.info(String.format("New holding values will be: %s = %d, %s = %d", fromKey, newFromAccountBalance, toKey, newToAccountBalance));
+		LOGGER.info(String.format("New holding values will be: %s = %d, %s = %d", fromKey, newFromAccountBalance, toKey, newToAccountBalance));
 		stub.putStringState(fromKey, Integer.toString(newFromAccountBalance));
 		stub.putStringState(toKey, Integer.toString(newToAccountBalance));
-		log.info("Transfer complete.");
+		LOGGER.info("Transfer complete.");
 
 		return newSuccessResponse(String.format("Successfully transferred %d assets from %s to %s.", transferAmount, fromKey, toKey));
 	}
 
 	public Response init(ChaincodeStub stub, String[] args) {
+		LOGGER.info("now go to init customer method ,args is {},args length is [{}]",Arrays.toString(args),args.length);
 		if (args.length != 4) throw new IllegalArgumentException("Incorrect number of arguments. Expecting: init(account1, amount1, account2, amount2)");
 
 		final String accountKey1 = args[0];
@@ -166,8 +171,11 @@ public class SimpleChaincode extends ChaincodeBase {
 		if (args.length != 1) throw new IllegalArgumentException("Incorrect number of arguments. Expecting: query(account)");
 
 		final String accountKey = args[0];
-
-		return newSuccessResponse(String.valueOf(Integer.parseInt(stub.getStringState(accountKey))));
+		LOGGER.info("incoming query request with accountKey [{}]",accountKey);
+		byte [] payload=stub.getState(accountKey);
+        String result=stub.getStringState(accountKey);
+        LOGGER.info("Result is [{}]",result);
+		return newSuccessResponse(result,payload);
 
 	}
 
@@ -188,6 +196,7 @@ public class SimpleChaincode extends ChaincodeBase {
 	}
 
 	public static void main(String[] args) throws Exception {
+		LOGGER.info("Test logs-------------------");
 		new SimpleChaincode().start(args);
 	}
 

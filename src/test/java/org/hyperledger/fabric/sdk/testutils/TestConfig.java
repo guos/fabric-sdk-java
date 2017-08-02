@@ -90,9 +90,9 @@ public class TestConfig {
             // Default values
 
             defaultProperty(GOSSIPWAITTIME, "5000");
-            defaultProperty(INVOKEWAITTIME, "100000");
+            defaultProperty(INVOKEWAITTIME, "180000");
             defaultProperty(DEPLOYWAITTIME, "120000");
-            defaultProperty(PROPOSALWAITTIME, "120000");
+            defaultProperty(PROPOSALWAITTIME, "300000");//300s
 
 
             //////

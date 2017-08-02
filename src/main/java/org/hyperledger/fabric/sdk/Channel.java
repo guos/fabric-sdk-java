@@ -60,6 +60,7 @@ import org.hyperledger.fabric.protos.common.Configtx.ConfigSignature;
 import org.hyperledger.fabric.protos.common.Configtx.ConfigUpdateEnvelope;
 import org.hyperledger.fabric.protos.common.Configtx.ConfigValue;
 import org.hyperledger.fabric.protos.common.Ledger;
+import org.hyperledger.fabric.protos.msp.Identities;
 import org.hyperledger.fabric.protos.msp.MspConfig;
 import org.hyperledger.fabric.protos.orderer.Ab;
 import org.hyperledger.fabric.protos.orderer.Ab.BroadcastResponse;
@@ -86,7 +87,6 @@ import org.hyperledger.fabric.sdk.exception.ProposalException;
 import org.hyperledger.fabric.sdk.exception.TransactionEventException;
 import org.hyperledger.fabric.sdk.exception.TransactionException;
 import org.hyperledger.fabric.sdk.helper.Config;
-import org.hyperledger.fabric.sdk.helper.DiagnosticFileDumper;
 import org.hyperledger.fabric.sdk.helper.Utils;
 import org.hyperledger.fabric.sdk.transaction.InstallProposalBuilder;
 import org.hyperledger.fabric.sdk.transaction.InstantiateProposalBuilder;
@@ -115,11 +115,7 @@ import static org.hyperledger.fabric.sdk.transaction.ProtoUtils.getSignatureHead
 public class Channel {
     private static final Log logger = LogFactory.getLog(Channel.class);
     private static final boolean IS_DEBUG_LEVEL = logger.isDebugEnabled();
-    private static final boolean IS_TRACE_LEVEL = logger.isTraceEnabled();
-
     private static final Config config = Config.getConfig();
-    private static final DiagnosticFileDumper diagnosticFileDumper = IS_TRACE_LEVEL
-            ? config.getDiagnosticFileDumper() : null;
     private static final String SYSTEM_CHANNEL_NAME = "";
 
     // Name of the channel is only meaningful to the client
@@ -590,51 +586,122 @@ public class Channel {
         logger.debug(format("Channel %s loadCACertificates completed ", name));
     }
 
-    private Block getGenesisBlock(Orderer orderer) throws TransactionException {
+    private Block getGenesisBlock(Orderer order) throws TransactionException {
+        try {
+            if (genesisBlock != null) {
+                logger.debug(format("Channel %s getGenesisBlock already present", name));
 
-        if (genesisBlock != null) {
-            logger.debug(format("Channel %s getGenesisBlock already present", name));
+            } else {
 
-        } else {
+                final long start = System.currentTimeMillis();
 
-            SeekSpecified seekSpecified = SeekSpecified.newBuilder()
-                    .setNumber(0)
-                    .build();
-            SeekPosition seekPosition = SeekPosition.newBuilder()
-                    .setSpecified(seekSpecified)
-                    .build();
+                do {
 
-            SeekSpecified seekStopSpecified = SeekSpecified.newBuilder()
-                    .setNumber(0)
-                    .build();
+                    SeekSpecified seekSpecified = SeekSpecified.newBuilder()
+                            .setNumber(0)
+                            .build();
+                    SeekPosition seekPosition = SeekPosition.newBuilder()
+                            .setSpecified(seekSpecified)
+                            .build();
 
-            SeekPosition seekStopPosition = SeekPosition.newBuilder()
-                    .setSpecified(seekStopSpecified)
-                    .build();
+                    SeekSpecified seekStopSpecified = SeekSpecified.newBuilder()
+                            .setNumber(0)
+                            .build();
 
-            SeekInfo seekInfo = SeekInfo.newBuilder()
-                    .setStart(seekPosition)
-                    .setStop(seekStopPosition)
-                    .setBehavior(SeekInfo.SeekBehavior.BLOCK_UNTIL_READY)
-                    .build();
+                    SeekPosition seekStopPosition = SeekPosition.newBuilder()
+                            .setSpecified(seekStopSpecified)
+                            .build();
 
-            ArrayList<DeliverResponse> deliverResponses = new ArrayList<>();
+                    SeekInfo seekInfo = SeekInfo.newBuilder()
+                            .setStart(seekPosition)
+                            .setStop(seekStopPosition)
+                            .setBehavior(SeekInfo.SeekBehavior.BLOCK_UNTIL_READY)
+                            .build();
 
-            seekBlock(seekInfo, deliverResponses, orderer);
+                    ChannelHeader deliverChainHeader = createChannelHeader(HeaderType.DELIVER_SEEK_INFO, "4",
+                            name, 0, getCurrentFabricTimestamp(), null);
 
-            DeliverResponse blockresp = deliverResponses.get(1);
-            Block configBlock = blockresp.getBlock();
-            if (configBlock == null) {
-                throw new TransactionException(format("In getGenesisBlock newest block for channel %s fetch bad deliver returned null:", name));
+                    String mspid = client.getUserContext().getMspId();
+                    String cert = getEnrollment().getCert();
+
+                    Identities.SerializedIdentity identity = Identities.SerializedIdentity.newBuilder()
+                            .setIdBytes(ByteString.copyFromUtf8(cert)).
+                                    setMspid(mspid).build();
+
+                    SignatureHeader deliverSignatureHeader = SignatureHeader.newBuilder()
+                            .setCreator(identity.toByteString())
+                            .setNonce(ByteString.copyFrom(Utils.generateNonce()))
+                            .build();
+
+                    Header deliverHeader = Header.newBuilder()
+                            .setSignatureHeader(deliverSignatureHeader.toByteString())
+                            .setChannelHeader(deliverChainHeader.toByteString())
+                            .build();
+
+                    Payload deliverPayload = Payload.newBuilder()
+                            .setHeader(deliverHeader)
+                            .setData(seekInfo.toByteString())
+                            .build();
+
+                    byte[] deliverPayloadBytes = deliverPayload.toByteArray();
+
+                    Envelope deliverEnvelope = Envelope.newBuilder()
+                            .setSignature(ByteString.copyFrom(client.getCryptoSuite().sign(getEnrollment().getKey(), deliverPayloadBytes)))
+                            .setPayload(ByteString.copyFrom(deliverPayloadBytes))
+                            .build();
+
+                    DeliverResponse[] deliver = order.sendDeliver(deliverEnvelope);
+                    if (deliver.length < 1) {
+                        logger.warn(format("Genesis block for channel %s fetch bad deliver missing status block only got blocks:%d", name, deliver.length));
+                        //odd so lets try again....
+                    } else {
+
+                        DeliverResponse status = deliver[0];
+                        logger.debug(format("Channel %s getGenesisBlock deliver status: %d", name, status.getStatusValue()));
+                        if (status.getStatusValue() == 404) {
+                            logger.warn(format("Bad deliver expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
+                            // keep trying...
+                        } else if (status.getStatusValue() != 200) {
+                            throw new TransactionException(format("Bad deliver expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
+
+                        } else {
+
+                            if (deliver.length < 2) {
+                                logger.warn(format("Genesis block for channel %s fetch bad deliver missing genesis block only got %d:", name, deliver.length));
+                                //odd try again
+                            } else {
+
+                                DeliverResponse blockresp = deliver[1];
+                                genesisBlock = blockresp.getBlock();
+
+                            }
+                        }
+                    }
+
+                    if (genesisBlock == null) {
+                        long now = System.currentTimeMillis();
+
+                        long duration = now - start;
+
+                        if (duration > config.getGenesisBlockWaitTime()) {
+                            throw new TransactionException(format("Getting genesis block time exceeded %s seconds for channel %s", Long.toString(TimeUnit.MILLISECONDS.toSeconds(duration)), name));
+                        }
+                        try {
+                            Thread.sleep(200); //try again
+                        } catch (InterruptedException e) {
+                            TransactionException te = new TransactionException("getGenesisBlock thread Sleep", e);
+                            logger.warn(te.getMessage(), te);
+                        }
+                    }
+                } while (genesisBlock == null);
             }
-
-            int dataCount = configBlock.getData().getDataCount();
-            if (dataCount < 1) {
-                throw new TransactionException(format("In getGenesisBlock bad config block data count %d", dataCount));
-            }
-
-            genesisBlock = blockresp.getBlock();
-
+        } catch (TransactionException e) {
+            logger.error(e.getMessage(), e);
+            throw e;
+        } catch (Exception e) {
+            TransactionException exp = new TransactionException("getGenesisBlock " + e.getMessage(), e);
+            logger.error(exp.getMessage(), exp);
+            throw exp;
         }
 
         if (genesisBlock == null) { //make sure it was really set.
@@ -646,7 +713,6 @@ public class Channel {
 
         logger.debug(format("Channel %s getGenesisBlock done.", name));
         return genesisBlock;
-
     }
 
     private Map<String, MSP> msps = new HashMap<>();
@@ -880,7 +946,11 @@ public class Channel {
 
         try {
 
+            Orderer orderer = getRandomOrderer();
+
             logger.trace(format("Last config index is %d", number));
+
+            TransactionContext txContext = getTransactionContext();
 
             SeekSpecified seekSpecified = SeekSpecified.newBuilder().setNumber(number).build();
 
@@ -894,123 +964,64 @@ public class Channel {
                     .setBehavior(SeekInfo.SeekBehavior.BLOCK_UNTIL_READY)
                     .build();
 
-            ArrayList<DeliverResponse> deliverResponses = new ArrayList<>();
+            ChannelHeader seekInfoHeader = createChannelHeader(HeaderType.DELIVER_SEEK_INFO,
+                    txContext.getTxID(), name, txContext.getEpoch(), getCurrentFabricTimestamp(), null);
 
-            seekBlock(seekInfo, deliverResponses, getRandomOrderer());
+            SignatureHeader signatureHeader = SignatureHeader.newBuilder()
+                    .setCreator(txContext.getIdentity().toByteString())
+                    .setNonce(txContext.getNonce())
+                    .build();
 
-            DeliverResponse blockresp = deliverResponses.get(1);
+            Header seekHeader = Header.newBuilder()
+                    .setSignatureHeader(signatureHeader.toByteString())
+                    .setChannelHeader(seekInfoHeader.toByteString())
+                    .build();
 
-            Block retBlock = blockresp.getBlock();
-            if (retBlock == null) {
-                throw new TransactionException(format("newest block for channel %s fetch bad deliver returned null:", name));
-            }
+            Payload seekPayload = Payload.newBuilder()
+                    .setHeader(seekHeader)
+                    .setData(seekInfo.toByteString())
+                    .build();
 
-            int dataCount = retBlock.getData().getDataCount();
-            if (dataCount < 1) {
-                throw new TransactionException(format("Bad config block data count %d", dataCount));
-            }
+            Envelope envelope = Envelope.newBuilder().setSignature(txContext.signByteString(seekPayload.toByteArray()))
+                    .setPayload(seekPayload.toByteString())
+                    .build();
 
-            logger.trace(format("Received  block for channel %s, block no:%d, transaction count: %d",
-                    name, retBlock.getHeader().getNumber(), retBlock.getData().getDataCount()));
+            DeliverResponse[] deliver = orderer.sendDeliver(envelope);
 
-            return retBlock;
+            final Block configBlock;
+            if (deliver.length < 1) {
+                throw new TransactionException(format("newest block for channel %s fetch bad deliver missing status block only got blocks:%d", name, deliver.length));
 
-        } catch (TransactionException e) {
-            logger.error(e.getMessage(), e);
-            throw e;
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
-            throw new TransactionException(e);
-        }
+            } else {
 
-    }
-
-    private int seekBlock(SeekInfo seekInfo, List<DeliverResponse> deliverResponses, Orderer ordererIn) throws TransactionException {
-
-        logger.trace(format("seekBlock for channel %s", name));
-        final long start = System.currentTimeMillis();
-        @SuppressWarnings ("UnusedAssignment")
-        int statusRC = 404;
-
-        try {
-
-            do {
-
-                statusRC = 404;
-
-                final Orderer orderer = ordererIn != null ? ordererIn : getRandomOrderer();
-
-                TransactionContext txContext = getTransactionContext();
-
-                ChannelHeader seekInfoHeader = createChannelHeader(HeaderType.DELIVER_SEEK_INFO,
-                        txContext.getTxID(), name, txContext.getEpoch(), getCurrentFabricTimestamp(), null);
-
-                SignatureHeader signatureHeader = SignatureHeader.newBuilder()
-                        .setCreator(txContext.getIdentity().toByteString())
-                        .setNonce(txContext.getNonce())
-                        .build();
-
-                Header seekHeader = Header.newBuilder()
-                        .setSignatureHeader(signatureHeader.toByteString())
-                        .setChannelHeader(seekInfoHeader.toByteString())
-                        .build();
-
-                Payload seekPayload = Payload.newBuilder()
-                        .setHeader(seekHeader)
-                        .setData(seekInfo.toByteString())
-                        .build();
-
-                Envelope envelope = Envelope.newBuilder().setSignature(txContext.signByteString(seekPayload.toByteArray()))
-                        .setPayload(seekPayload.toByteString())
-                        .build();
-
-                DeliverResponse[] deliver = orderer.sendDeliver(envelope);
-
-                if (deliver.length < 1) {
-                    logger.warn(format("Genesis block for channel %s fetch bad deliver missing status block only got blocks:%d", name, deliver.length));
-                    //odd so lets try again....
-                    statusRC = 404;
-
+                DeliverResponse status = deliver[0];
+                if (status.getStatusValue() != 200) {
+                    throw new TransactionException(format("Bad newest block expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
                 } else {
-
-                    DeliverResponse status = deliver[0];
-                    statusRC = status.getStatusValue();
-
-                    if (statusRC == 404 || statusRC == 503) { //404 - block not found.  503 - service not available usually means kafka is not ready but starting.
-                        logger.warn(format("Bad deliver expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
-                        // keep trying... else
-                        statusRC = 404;
-
-                    } else if (statusRC != 200) { // Assume for anything other than 200 we have a non retryable situation
-                        throw new TransactionException(format("Bad newest block expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
+                    if (deliver.length < 2) {
+                        throw new TransactionException(format("newest block for channel %s fetch bad deliver missing genesis block only got %d:", name, deliver.length));
                     } else {
-                        if (deliver.length < 2) {
-                            throw new TransactionException(format("Newest block for channel %s fetch bad deliver missing genesis block only got %d:", name, deliver.length));
-                        } else {
 
-                            deliverResponses.addAll(Arrays.asList(deliver));
+                        DeliverResponse blockresp = deliver[1];
+                        configBlock = blockresp.getBlock();
+                        if (configBlock == null) {
+                            throw new TransactionException(format("newest block for channel %s fetch bad deliver returned null:", name));
+                        }
+
+                        int dataCount = configBlock.getData().getDataCount();
+                        if (dataCount < 1) {
+                            throw new TransactionException(format("Bad config block data count %d", dataCount));
                         }
                     }
-
                 }
+            }
 
-                // Not 200 so sleep to try again
+            //getChannelConfig -  config block number ::%s  -- numberof tx :: %s', block.header.number, block.data.data.length)
 
-                if (200 != statusRC) {
-                    long duration = System.currentTimeMillis() - start;
+            logger.trace(format("Received latest config block for channel %s, block no:%d, transaction count: %d",
+                    name, configBlock.getHeader().getNumber(), configBlock.getData().getDataCount()));
 
-                    if (duration > config.getGenesisBlockWaitTime()) {
-                        throw new TransactionException(format("Getting block time exceeded %s seconds for channel %s", Long.toString(TimeUnit.MILLISECONDS.toSeconds(duration)), name));
-                    }
-                    try {
-                        Thread.sleep(200); //try again
-                    } catch (InterruptedException e) {
-                        TransactionException te = new TransactionException("seekBlock thread Sleep", e);
-                        logger.warn(te.getMessage(), te);
-                    }
-                }
-
-            } while (statusRC != 200);
+            return configBlock;
 
         } catch (TransactionException e) {
             logger.error(e.getMessage(), e);
@@ -1019,8 +1030,6 @@ public class Channel {
             logger.error(e.getMessage(), e);
             throw new TransactionException(e);
         }
-
-        return statusRC;
 
     }
 
@@ -1032,19 +1041,58 @@ public class Channel {
                 .setNewest(Ab.SeekNewest.getDefaultInstance())
                 .build();
 
+        TransactionContext txContext = getTransactionContext();
+
         SeekInfo seekInfo = SeekInfo.newBuilder()
                 .setStart(seekPosition)
                 .setStop(seekPosition)
                 .setBehavior(SeekInfo.SeekBehavior.BLOCK_UNTIL_READY)
                 .build();
 
-        ArrayList<DeliverResponse> deliverResponses = new ArrayList<>();
+        ChannelHeader seekInfoHeader = createChannelHeader(HeaderType.DELIVER_SEEK_INFO,
+                txContext.getTxID(), name, txContext.getEpoch(), getCurrentFabricTimestamp(), null);
 
-        seekBlock(seekInfo, deliverResponses, orderer);
+        SignatureHeader signatureHeader = SignatureHeader.newBuilder()
+                .setCreator(txContext.getIdentity().toByteString())
+                .setNonce(txContext.getNonce())
+                .build();
 
-        DeliverResponse blockresp = deliverResponses.get(1);
+        Header seekHeader = Header.newBuilder()
+                .setSignatureHeader(signatureHeader.toByteString())
+                .setChannelHeader(seekInfoHeader.toByteString())
+                .build();
 
-        Block latestBlock = blockresp.getBlock();
+        Payload seekPayload = Payload.newBuilder()
+                .setHeader(seekHeader)
+                .setData(seekInfo.toByteString())
+                .build();
+
+        Envelope envelope = Envelope.newBuilder().setSignature(txContext.signByteString(seekPayload.toByteArray()))
+                .setPayload(seekPayload.toByteString())
+                .build();
+
+        DeliverResponse[] deliver = orderer.sendDeliver(envelope);
+
+        Block latestBlock;
+        if (deliver.length < 1) {
+            throw new TransactionException(format("newest block for channel %s fetch bad deliver missing status block only got blocks:%d", name, deliver.length));
+
+        } else {
+
+            DeliverResponse status = deliver[0];
+            logger.debug(format("Channel %s getLatestBlock returned status %s", name, status.getStatusValue()));
+            if (status.getStatusValue() != 200) {
+                throw new TransactionException(format("Bad newest block expected status 200  got  %d, Channel %s", status.getStatusValue(), name));
+            } else {
+                if (deliver.length < 2) {
+                    throw new TransactionException(format("newest block for channel %s fetch bad deliver missing genesis block only got %d:", name, deliver.length));
+                } else {
+
+                    DeliverResponse blockresp = deliver[1];
+                    latestBlock = blockresp.getBlock();
+                }
+            }
+        }
 
         if (latestBlock == null) {
             throw new TransactionException(format("newest block for channel %s fetch bad deliver returned null:", name));
@@ -1933,13 +1981,6 @@ public class Channel {
         for (Peer peer : peers) {
             logger.debug(format("Channel %s send proposal to peer %s at url %s",
                     name, peer.getName(), peer.getUrl()));
-
-            if (null != diagnosticFileDumper) {
-                logger.trace(format("Sending to channel %s, peer: %s, proposal: %s", name, peer.getName(),
-                        diagnosticFileDumper.createDiagnosticProtobufFile(signedProposal.toByteArray())));
-
-            }
-
             Future<FabricProposalResponse.ProposalResponse> proposalResponseListenableFuture;
             try {
                 proposalResponseListenableFuture = peer.sendProposalAsync(signedProposal);
@@ -1965,11 +2006,6 @@ public class Channel {
                 status = fabricResponse.getResponse().getStatus();
                 logger.debug(format("Channel %s got back from peer %s status: %d, message: %s",
                         name, peerName, status, message));
-                if (null != diagnosticFileDumper) {
-                    logger.trace(format("Got back from channel %s, peer: %s, proposal response: %s", name, peerName,
-                            diagnosticFileDumper.createDiagnosticProtobufFile(fabricResponse.toByteArray())));
-
-                }
             } catch (InterruptedException e) {
                 message = "Sending proposal to " + peerName + " failed because of interruption";
                 logger.error(message, e);
@@ -2119,13 +2155,6 @@ public class Channel {
             for (Orderer orderer : orderers) {
 
                 try {
-
-                    if (null != diagnosticFileDumper) {
-                        logger.trace(format("Sending to channel %s, orderer: %s, transaction: %s", name, orderer.getName(),
-                                diagnosticFileDumper.createDiagnosticProtobufFile(transactionEnvelope.toByteArray())));
-
-                    }
-
                     resp = orderer.sendTransaction(transactionEnvelope);
                     if (resp.getStatus() == Status.SUCCESS) {
 
@@ -2258,7 +2287,7 @@ public class Channel {
                 return false;
             }
 
-//            Block block = event.seekBlock();
+//            Block block = event.getBlock();
 //            final long num = block.getHeader().getNumber();
 
             // May be fed by multiple eventhubs but BlockingQueue.add() is thread-safe

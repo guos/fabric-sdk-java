@@ -38,6 +38,7 @@ function up(){
 }
 
 function down(){
+   ./crm.sh
   docker-compose down;
 }
 

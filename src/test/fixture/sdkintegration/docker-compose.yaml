@@ -136,5 +136,6 @@ services:
        - orderer.example.com
        - peer0.org2.example.com
 
-  ccenv:
-    image: hyperledger/fabric-ccenv${IMAGE_TAG_FABRIC}
+
+  javaenv:
+    image: hyperledger/fabric-javaenv${IMAGE_TAG_FABRIC}

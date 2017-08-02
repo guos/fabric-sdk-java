@@ -141,7 +141,8 @@ public class InstallProposalBuilder extends LSCCProposalBuilder {
                 // chaincodeSource may be a File or InputStream
 
                 //   Verify that chaincodePath is null
-                if (null != chaincodePath) {
+            	//TODO: bug ""
+                if (null != chaincodePath&&!"".equals(chaincodePath)) {
                     throw new IllegalArgumentException("chaincodePath must be null for Java chaincode");
                 }
 
