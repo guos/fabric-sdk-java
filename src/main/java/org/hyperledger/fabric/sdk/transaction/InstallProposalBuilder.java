@@ -24,6 +24,7 @@ import java.util.List;
 
 import com.google.protobuf.ByteString;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.hyperledger.fabric.protos.peer.Chaincode.ChaincodeDeploymentSpec;
@@ -141,8 +142,8 @@ public class InstallProposalBuilder extends LSCCProposalBuilder {
                 // chaincodeSource may be a File or InputStream
 
                 //   Verify that chaincodePath is null
-            	//TODO: bug ""
-                if (null != chaincodePath&&!"".equals(chaincodePath)) {
+            	//bug fix "" FAB-5610
+                if (null !=StringUtils.trimToNull(chaincodePath)) {
                     throw new IllegalArgumentException("chaincodePath must be null for Java chaincode");
                 }
 
